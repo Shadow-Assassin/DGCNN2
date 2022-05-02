@@ -34,7 +34,7 @@ def download_modelnet40():
         zipfile = os.path.basename(www)
         os.system('wget %s --no-check-certificate; unzip %s' % (www, zipfile))
         os.system('mv %s %s' % ('modelnet40_ply_hdf5_2048', DATA_DIR))
-        os.system('rm %s' % (zipfile))
+        # os.system('rm %s' % (zipfile))
 
 
 def download_shapenetpart():
@@ -47,7 +47,7 @@ def download_shapenetpart():
         zipfile = os.path.basename(www)
         os.system('wget %s --no-check-certificate; unzip %s' % (www, zipfile))
         os.system('mv %s %s' % ('hdf5_data', os.path.join(DATA_DIR, 'shapenet_part_seg_hdf5_data')))
-        os.system('rm %s' % (zipfile))
+        # os.system('rm %s' % (zipfile))
 
 
 def download_S3DIS():
@@ -60,17 +60,17 @@ def download_S3DIS():
         zipfile = os.path.basename(www)
         os.system('wget %s --no-check-certificate; unzip %s' % (www, zipfile))
         os.system('mv %s %s' % ('indoor3d_sem_seg_hdf5_data', DATA_DIR))
-        os.system('rm %s' % (zipfile))
+        # os.system('rm %s' % (zipfile))
     if not os.path.exists(os.path.join(DATA_DIR, 'Stanford3dDataset_v1.2_Aligned_Version')):
-        if not os.path.exists(os.path.join(DATA_DIR, 'Stanford3dDataset_v1.2_Aligned_Version.zip')):
+        zippath = os.path.join(BASE_DIR, 'Stanford3dDataset_v1.2_Aligned_Version.zip')
+        if not os.path.exists(zippath):
             print('Please download Stanford3dDataset_v1.2_Aligned_Version.zip \
-                from https://goo.gl/forms/4SoGp4KtH1jfRqEj2 and place it under data/')
+                from https://goo.gl/forms/4SoGp4KtH1jfRqEj2 and place it under ../')
             sys.exit(0)
         else:
-            zippath = os.path.join(DATA_DIR, 'Stanford3dDataset_v1.2_Aligned_Version.zip')
             os.system('unzip %s' % (zippath))
             os.system('mv %s %s' % ('Stanford3dDataset_v1.2_Aligned_Version', DATA_DIR))
-            os.system('rm %s' % (zippath))
+            # os.system('rm %s' % (zippath))
 
 
 def load_data_cls(partition):
