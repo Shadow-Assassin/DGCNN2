@@ -22,38 +22,144 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
+from util import to_cuda
+VERY_SMALL_NUMBER = 1e-12
+INF = 1e20
 
 
-def knn(x, k):
-    inner = -2*torch.matmul(x.transpose(2, 1), x)
-    xx = torch.sum(x**2, dim=1, keepdim=True)
-    pairwise_distance = -xx - inner - xx.transpose(2, 1)
+def compute_distance_mat(X, weight=None):
+    if weight is not None:
+        trans_X = torch.mm(X, weight)
+    else:
+        trans_X = X
+    norm = torch.sum(trans_X * X, dim=-1)
+    dists = -2 * torch.matmul(trans_X, X.transpose(-1, -2)) + norm.unsqueeze(0) + norm.unsqueeze(1)
+    return dists
+
+
+class GraphLearner(nn.Module):
+    def __init__(self, input_size, hidden_size, num_pers=16, metric_type='attention'):
+        super(GraphLearner, self).__init__()
+        self.metric_type = metric_type
+        if metric_type == 'attention':
+            self.linear_sims = nn.ModuleList([nn.Linear(input_size, hidden_size, bias=False) for _ in range(num_pers)])
+            print('[ Multi-perspective {} GraphLearner: {} ]'.format(metric_type, num_pers))
+
+        elif metric_type == 'weighted_cosine':
+            self.weight_tensor = torch.Tensor(num_pers, input_size)
+            self.weight_tensor = nn.Parameter(nn.init.xavier_uniform_(self.weight_tensor))
+            print('[ Multi-perspective {} GraphLearner: {} ]'.format(metric_type, num_pers))
+
+        elif metric_type == 'gat_attention':
+            self.linear_sims1 = nn.ModuleList([nn.Linear(input_size, 1, bias=False) for _ in range(num_pers)])
+            self.linear_sims2 = nn.ModuleList([nn.Linear(input_size, 1, bias=False) for _ in range(num_pers)])
+            self.leakyrelu = nn.LeakyReLU(0.2)
+            print('[ GAT_Attention GraphLearner]')
+
+        elif metric_type == 'kernel':
+            self.precision_inv_dis = nn.Parameter(torch.Tensor(1, 1))
+            self.precision_inv_dis.data.uniform_(0, 1.0)
+            self.weight = nn.Parameter(nn.init.xavier_uniform_(torch.Tensor(input_size, hidden_size)))
+
+        elif metric_type == 'transformer':
+            self.lin_wq = nn.Linear(input_size, hidden_size, bias=False)
+            self.lin_wk = nn.Linear(input_size, hidden_size, bias=False)
+
+        elif metric_type == 'Gaussian_Mahalanobis':
+            self.lin = nn.Linear(input_size, hidden_size, bias=False)
+
+        else:
+            raise ValueError('Unknown metric_type: {}'.format(metric_type))
+
+        print('[ Graph Learner metric type: {} ]'.format(metric_type))
+
+    def forward(self, context):
+        """
+        Parameters
+        :context, (batch_size, ctx_size, dim)
+
+        Returns
+        :similarity, (batch_size, ctx_size, ctx_size)
+        """
+        if self.metric_type == 'attention':
+            similarity = 0
+            for _ in range(len(self.linear_sims)):
+                context_fc = torch.relu(self.linear_sims[_](context))
+                similarity += torch.matmul(context_fc, context_fc.transpose(-1, -2))
+            similarity /= len(self.linear_sims)
+
+        elif self.metric_type == 'weighted_cosine':
+            expand_weight_tensor = self.weight_tensor.unsqueeze(1)
+            if len(context.shape) == 3:
+                expand_weight_tensor = expand_weight_tensor.unsqueeze(1)
+            context_fc = context.unsqueeze(0) * expand_weight_tensor
+            context_norm = F.normalize(context_fc, p=2, dim=-1)
+            similarity = torch.matmul(context_norm, context_norm.transpose(-1, -2)).mean(0)
+            similarity = F.relu(similarity)
+
+        elif self.metric_type == 'transformer':
+            Q = self.lin_wq(context)
+            K = self.lin_wk(context)
+            similarity = torch.matmul(Q, K.transpose(-1, -2)) / math.sqrt(Q.shape[-1])
+            similarity = F.softmax(similarity, dim=-1)
+
+        elif self.metric_type == 'gat_attention':
+            similarity = []
+            for _ in range(len(self.linear_sims1)):
+                a_input1 = self.linear_sims1[_](context)
+                a_input2 = self.linear_sims2[_](context)
+                similarity.append(self.leakyrelu(a_input1 + a_input2.transpose(-1, -2)))
+            similarity = torch.mean(torch.stack(similarity, 0), 0)
+
+        elif self.metric_type == 'Gaussian_Mahalanobis':
+            x = self.lin(context)
+            inner = torch.matmul(x, x.transpose(-1, -2))
+            norm2 = torch.sum(x ** 2, dim=-1, keepdim=True)
+            similarity = -norm2 + 2 * inner - norm2.transpose(-1, -2)  # negative_pairwise_distance
+            similarity = F.softmax(similarity, dim=-1)
+
+        return similarity
+
+
+def knn(x, k, metric='Euclidean'):
+    if metric=='Euclidean':
+        inner = torch.matmul(x.transpose(2, 1), x)
+        norm2 = torch.sum(x ** 2, dim=1, keepdim=True)
+        pairwise_similarity = -norm2 + 2*inner - norm2.transpose(2, 1)  # negative_pairwise_distance
+    elif metric=='Cosine':
+        x_normed = F.normalize(x, p=2, dim=1)
+        pairwise_similarity = torch.matmul(x_normed.transpose(2, 1), x_normed)
+    else:
+        exit('Unknown distance metric!')
+        return None
  
-    idx = pairwise_distance.topk(k=k, dim=-1)[1]   # (batch_size, num_points, k)
+    idx = pairwise_similarity.topk(k=k, dim=-1)[1]   # (batch_size, num_points, k)
     return idx
 
 
-def get_graph_feature(x, k=20, idx=None, dim9=False):
+def get_graph_feature(x, k=20, weight=None, idx=None, dim9=False):
     batch_size = x.size(0)
     num_points = x.size(2)
     x = x.view(batch_size, -1, num_points)
+    num_dims = x.size(1)
     if idx is None:
         if dim9 == False:
             idx = knn(x, k=k)   # (batch_size, num_points, k)
         else:
             idx = knn(x[:, 6:], k=k)
+
     device = torch.device('cuda')
 
     idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
-
     idx = idx + idx_base
-
     idx = idx.view(-1)
- 
-    _, num_dims, _ = x.size()
+    if weight is not None:
+        weight = weight.view(-1, 1)
 
     x = x.transpose(2, 1).contiguous()   # (batch_size, num_points, num_dims)  -> (batch_size*num_points, num_dims) #   batch_size * num_points * k + range(0, batch_size*num_points)
     feature = x.view(batch_size*num_points, -1)[idx, :]
+    if weight is not None:
+        feature = torch.mul(feature, weight)
     feature = feature.view(batch_size, num_points, k, num_dims) 
     x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
     
@@ -317,6 +423,7 @@ class DGCNN_semseg(nn.Module):
         super(DGCNN_semseg, self).__init__()
         self.args = args
         self.k = args.k
+        self.num_features = args.num_features
         
         self.bn1 = nn.BatchNorm2d(64)
         self.bn2 = nn.BatchNorm2d(64)
@@ -353,23 +460,34 @@ class DGCNN_semseg(nn.Module):
                                    nn.LeakyReLU(negative_slope=0.2))
         self.dp1 = nn.Dropout(p=args.dropout)
         self.conv9 = nn.Conv1d(256, 13, kernel_size=1, bias=False)
-        
+
+        self.pos_gsl = GraphLearner(3, 64, num_pers=8, metric_type='Gaussian_Mahalanobis')
+        if self.num_features>3:
+            self.alpha = nn.Parameter(torch.Tensor(1, 1))
+            self.alpha.data.uniform_(0, 1.0)
+            self.sem_gsl = GraphLearner(self.num_features - 3, 64, num_pers=8, metric_type='weighted_cosine')
 
     def forward(self, x):
         batch_size = x.size(0)
         num_points = x.size(2)
 
-        x = get_graph_feature(x, k=self.k, dim9=True)   # (batch_size, 9, num_points) -> (batch_size, 9*2, num_points, k)
+        adj = self.pos_gsl(x.transpose(2, 1)[..., :3])
+        if self.num_features>3:
+            sem_adj = self.sem_gsl(x.transpose(2, 1)[..., 3:])
+            adj = adj + self.alpha*sem_adj
+        knn_val, knn_idx = adj.topk(k=self.k, dim=-1)
+
+        x = get_graph_feature(x, k=self.k, weight=knn_val, idx=knn_idx)   # (batch_size, 9, num_points) -> (batch_size, 9*2, num_points, k)
         x = self.conv1(x)                       # (batch_size, 9*2, num_points, k) -> (batch_size, 64, num_points, k)
         x = self.conv2(x)                       # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
         x1 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
 
-        x = get_graph_feature(x1, k=self.k)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
+        x = get_graph_feature(x1, k=self.k, weight=knn_val, idx=knn_idx)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
         x = self.conv3(x)                       # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
         x = self.conv4(x)                       # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
         x2 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
 
-        x = get_graph_feature(x2, k=self.k)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
+        x = get_graph_feature(x2, k=self.k, weight=knn_val, idx=knn_idx)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
         x = self.conv5(x)                       # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
         x3 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
 

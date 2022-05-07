@@ -163,6 +163,7 @@ def train(args, io):
     print(str(model))
 
     model = nn.DataParallel(model)
+    # model.load_state_dict(torch.load(os.path.join(args.model_root, 'model_%s.t7' % args.test_area)))
     print("Let's use", torch.cuda.device_count(), "GPUs!")
 
     if args.use_sgd:
@@ -397,6 +398,8 @@ if __name__ == "__main__":
                         help='evaluate the model')
     parser.add_argument('--num_points', type=int, default=4096,
                         help='num of points to use')
+    parser.add_argument('--num_features', type=int, default=9,
+                        help='num of features to use')
     parser.add_argument('--dropout', type=float, default=0.5,
                         help='dropout rate')
     parser.add_argument('--emb_dims', type=int, default=1024, metavar='N',

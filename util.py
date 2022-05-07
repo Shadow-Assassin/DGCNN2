@@ -44,3 +44,9 @@ class IOStream():
 
     def close(self):
         self.f.close()
+
+
+def to_cuda(x, device=None):
+    if device:
+        x = x.to(device)
+    return x
