@@ -461,20 +461,13 @@ class DGCNN_semseg(nn.Module):
         self.dp1 = nn.Dropout(p=args.dropout)
         self.conv9 = nn.Conv1d(256, 13, kernel_size=1, bias=False)
 
-        self.pos_gsl = GraphLearner(3, 64, num_pers=8, metric_type='Gaussian_Mahalanobis')
-        if self.num_features>3:
-            self.alpha = nn.Parameter(torch.Tensor(1, 1))
-            self.alpha.data.uniform_(0, 1.0)
-            self.sem_gsl = GraphLearner(self.num_features - 3, 64, num_pers=8, metric_type='weighted_cosine')
+        self.gsl1 = GraphLearner(self.num_features, 64, num_pers=8, metric_type='weighted_cosine')  # Gaussian_Mahalanobis
 
     def forward(self, x):
         batch_size = x.size(0)
         num_points = x.size(2)
 
-        adj = self.pos_gsl(x.transpose(2, 1)[..., :3])
-        if self.num_features>3:
-            sem_adj = self.sem_gsl(x.transpose(2, 1)[..., 3:])
-            adj = adj + self.alpha*sem_adj
+        adj = self.gsl1(x.transpose(2, 1))
         knn_val, knn_idx = adj.topk(k=self.k, dim=-1)
 
         x = get_graph_feature(x, k=self.k, weight=knn_val, idx=knn_idx)   # (batch_size, 9, num_points) -> (batch_size, 9*2, num_points, k)
