@@ -42,7 +42,7 @@ def collect_point_label(anno_path, out_filename, file_format='txt'):
 
     Args:
         anno_path: path to annotations. e.g. Area_1/office_2/Annotations/
-        out_filename: path to save collected points and labels (each line is XYZRGBL)
+        out_filename: path to save collected points and labels (each line is XYZRGBL) eg. "~/data/stanford_indoor3d/Area_1_conferenceRoom_1.npy"
         file_format: txt or numpy, determines what file format to save.
     Returns:
         None
@@ -119,7 +119,7 @@ def sample_data(data, num_sample):
     if (N == num_sample):
         return data, range(N)
     elif (N > num_sample):
-        sample = np.random.choice(N, num_sample)
+        sample = np.random.choice(N, num_sample)  # default: replace==True?!
         return data[sample, ...], sample
     else:
         sample = np.random.choice(N, num_sample-N)
@@ -135,6 +135,7 @@ def room2blocks(data_label_filename, data, label, num_point, block_size=1.0, str
                 random_sample=False, sample_num=None, sample_aug=1):
     """ Prepare block training data.
     Args:
+        data_label_filename: eg. "/home/zrfan/DGCNN2/data/stanford_indoor3d/Area_1_conferenceRoom_1.npy"
         data: N x 6 numpy array, 012 are XYZ in meters, 345 are RGB in [0,1]
             assumes the data is shifted (min point is origin) and aligned
             (aligned with XYZ axis)
@@ -177,7 +178,7 @@ def room2blocks(data_label_filename, data, label, num_point, block_size=1.0, str
             xbeg_list.append(xbeg)
             ybeg_list.append(ybeg)
     data_label_filename = data_label_filename[:-4].split('/')
-    data_label_filename = data_label_filename[len(data_label_filename) - 1]
+    data_label_filename = data_label_filename[len(data_label_filename) - 1]  # eg. Area_1_conferenceRoom_1
     test_area = data_label_filename[5]
     room_name = data_label_filename[7:]
     if not os.path.exists("data/indoor3d_sem_seg_hdf5_data_test/raw_data3d"):

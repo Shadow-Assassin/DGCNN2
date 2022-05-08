@@ -10,6 +10,7 @@
 
 from __future__ import print_function
 import os
+import time
 import argparse
 import torch
 import torch.nn as nn
@@ -232,6 +233,7 @@ def train(args, io):
                                                                                                   train_acc,
                                                                                                   avg_per_class_acc,
                                                                                                   np.mean(train_ious))
+        outstr = time.strftime('%Y-%m-%d %H:%M:%S ', time.localtime(time.time())) + outstr
         io.cprint(outstr)
 
         ####################
@@ -272,6 +274,7 @@ def train(args, io):
                                                                                               test_acc,
                                                                                               avg_per_class_acc,
                                                                                               np.mean(test_ious))
+        outstr = time.strftime('%Y-%m-%d %H:%M:%S ', time.localtime(time.time())) + outstr
         io.cprint(outstr)
         if np.mean(test_ious) >= best_test_iou:
             best_test_iou = np.mean(test_ious)
@@ -343,6 +346,7 @@ def test(args, io):
                                                                                                     test_acc,
                                                                                                     avg_per_class_acc,
                                                                                                     np.mean(test_ious))
+            outstr = time.strftime('%Y-%m-%d %H:%M:%S ', time.localtime(time.time())) + outstr
             io.cprint(outstr)
             all_true_cls.append(test_true_cls)
             all_pred_cls.append(test_pred_cls)
