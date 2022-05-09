@@ -12,7 +12,6 @@ Modified by
 @Time: 2020/3/9 9:32 PM
 """
 
-
 import os
 import sys
 import copy
@@ -23,18 +22,38 @@ import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
 from util import to_cuda
+
 VERY_SMALL_NUMBER = 1e-12
 INF = 1e20
 
 
-def compute_distance_mat(X, weight=None):
-    if weight is not None:
-        trans_X = torch.mm(X, weight)
-    else:
-        trans_X = X
-    norm = torch.sum(trans_X * X, dim=-1)
-    dists = -2 * torch.matmul(trans_X, X.transpose(-1, -2)) + norm.unsqueeze(0) + norm.unsqueeze(1)
-    return dists
+class GlobalAttention(nn.Module):
+    def __init__(self, input_size, k):
+        super(GlobalAttention, self).__init__()
+        self.k = k
+        self.weight = nn.Parameter(nn.init.xavier_uniform_(torch.Tensor(1, 1, input_size)))
+
+    def forward(self, x):  # B x N x C
+        B, N, C = x.size(0), x.size(1), x.size(2)
+        att = F.softmax(torch.sum(x * self.weight, dim=-1) / math.sqrt(C), dim=-1)  # B x N
+        _, sort_idx = torch.sort(att, dim=1)  # B x N
+        # sort_idx = sort_idx.detach()
+        knn_val = torch.zeros(B, N, self.k, dtype=x.dtype, device=x.device, requires_grad=True)
+        knn_idx = torch.zeros(B, N, self.k, dtype=sort_idx.dtype, device=x.device)
+        for b in range(B):
+            for i in range(N):
+                if i < self.k / 2:
+                    knn_idx[b, sort_idx[b, i], :] = sort_idx[b, 0:self.k]
+                elif i < N - self.k / 2:
+                    knn_idx[b, sort_idx[b, i], :] = sort_idx[b, i - self.k // 2: i + self.k // 2]
+                else:
+                    knn_idx[b, sort_idx[b, i], :] = sort_idx[b, -self.k:]
+                # knn_val[b, sort_idx[b, i], :] = att[b, knn_idx[b, sort_idx[b, i], :]]
+        index = torch.gather(input=knn_idx, dim=1, index=sort_idx[..., None].expand(-1, -1, self.k))
+        src = torch.gather(input=att[..., None].expand(-1, -1, self.k), dim=1, index=index)
+        knn_val = torch.scatter(input=knn_val, dim=1, index=sort_idx[..., None].expand(-1, -1, self.k), src=src)
+        # knn_val.requires_grad = True
+        return knn_val, knn_idx
 
 
 class GraphLearner(nn.Module):
@@ -122,18 +141,18 @@ class GraphLearner(nn.Module):
 
 
 def knn(x, k, metric='Euclidean'):
-    if metric=='Euclidean':
+    if metric == 'Euclidean':
         inner = torch.matmul(x.transpose(2, 1), x)
         norm2 = torch.sum(x ** 2, dim=1, keepdim=True)
-        pairwise_similarity = -norm2 + 2*inner - norm2.transpose(2, 1)  # negative_pairwise_distance
-    elif metric=='Cosine':
+        pairwise_similarity = -norm2 + 2 * inner - norm2.transpose(2, 1)  # negative_pairwise_distance
+    elif metric == 'Cosine':
         x_normed = F.normalize(x, p=2, dim=1)
         pairwise_similarity = torch.matmul(x_normed.transpose(2, 1), x_normed)
     else:
         exit('Unknown distance metric!')
         return None
- 
-    idx = pairwise_similarity.topk(k=k, dim=-1)[1]   # (batch_size, num_points, k)
+
+    idx = pairwise_similarity.topk(k=k, dim=-1)[1]  # (batch_size, num_points, k)
     return idx
 
 
@@ -144,13 +163,13 @@ def get_graph_feature(x, k=20, weight=None, idx=None, dim9=False):
     num_dims = x.size(1)
     if idx is None:
         if dim9 == False:
-            idx = knn(x, k=k)   # (batch_size, num_points, k)
+            idx = knn(x, k=k)  # (batch_size, num_points, k)
         else:
             idx = knn(x[:, 6:], k=k)
 
     device = torch.device('cuda')
 
-    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1)*num_points
+    idx_base = torch.arange(0, batch_size, device=device).view(-1, 1, 1) * num_points
     idx = idx + idx_base
     idx = idx.view(-1)
     if weight is not None:
@@ -160,12 +179,12 @@ def get_graph_feature(x, k=20, weight=None, idx=None, dim9=False):
     feature = x.view(batch_size*num_points, -1)[idx, :]
     if weight is not None:
         feature = torch.mul(feature, weight)
-    feature = feature.view(batch_size, num_points, k, num_dims) 
+    feature = feature.view(batch_size, num_points, k, num_dims)
     x = x.view(batch_size, num_points, 1, num_dims).repeat(1, 1, k, 1)
-    
-    feature = torch.cat((feature-x, x), dim=3).permute(0, 3, 1, 2).contiguous()
-  
-    return feature      # (batch_size, 2*num_dims, num_points, k)
+
+    feature = torch.cat((feature - x, x), dim=3).permute(0, 3, 1, 2).contiguous()
+
+    return feature  # (batch_size, 2*num_dims, num_points, k)
 
 
 class PointNet(nn.Module):
@@ -205,7 +224,7 @@ class DGCNN_cls(nn.Module):
         super(DGCNN_cls, self).__init__()
         self.args = args
         self.k = args.k
-        
+
         self.bn1 = nn.BatchNorm2d(64)
         self.bn2 = nn.BatchNorm2d(64)
         self.bn3 = nn.BatchNorm2d(128)
@@ -215,19 +234,19 @@ class DGCNN_cls(nn.Module):
         self.conv1 = nn.Sequential(nn.Conv2d(6, 64, kernel_size=1, bias=False),
                                    self.bn1,
                                    nn.LeakyReLU(negative_slope=0.2))
-        self.conv2 = nn.Sequential(nn.Conv2d(64*2, 64, kernel_size=1, bias=False),
+        self.conv2 = nn.Sequential(nn.Conv2d(64 * 2, 64, kernel_size=1, bias=False),
                                    self.bn2,
                                    nn.LeakyReLU(negative_slope=0.2))
-        self.conv3 = nn.Sequential(nn.Conv2d(64*2, 128, kernel_size=1, bias=False),
+        self.conv3 = nn.Sequential(nn.Conv2d(64 * 2, 128, kernel_size=1, bias=False),
                                    self.bn3,
                                    nn.LeakyReLU(negative_slope=0.2))
-        self.conv4 = nn.Sequential(nn.Conv2d(128*2, 256, kernel_size=1, bias=False),
+        self.conv4 = nn.Sequential(nn.Conv2d(128 * 2, 256, kernel_size=1, bias=False),
                                    self.bn4,
                                    nn.LeakyReLU(negative_slope=0.2))
         self.conv5 = nn.Sequential(nn.Conv1d(512, args.emb_dims, kernel_size=1, bias=False),
                                    self.bn5,
                                    nn.LeakyReLU(negative_slope=0.2))
-        self.linear1 = nn.Linear(args.emb_dims*2, 512, bias=False)
+        self.linear1 = nn.Linear(args.emb_dims * 2, 512, bias=False)
         self.bn6 = nn.BatchNorm1d(512)
         self.dp1 = nn.Dropout(p=args.dropout)
         self.linear2 = nn.Linear(512, 256)
@@ -294,7 +313,7 @@ class Transform_Net(nn.Module):
         self.linear2 = nn.Linear(512, 256, bias=False)
         self.bn4 = nn.BatchNorm1d(256)
 
-        self.transform = nn.Linear(256, 3*3)
+        self.transform = nn.Linear(256, 3 * 3)
         init.constant_(self.transform.weight, 0)
         init.eye_(self.transform.bias.view(3, 3))
 
@@ -324,7 +343,7 @@ class DGCNN_partseg(nn.Module):
         self.seg_num_all = seg_num_all
         self.k = args.k
         self.transform_net = Transform_Net(args)
-        
+
         self.bn1 = nn.BatchNorm2d(64)
         self.bn2 = nn.BatchNorm2d(64)
         self.bn3 = nn.BatchNorm2d(64)
@@ -369,7 +388,6 @@ class DGCNN_partseg(nn.Module):
                                    self.bn10,
                                    nn.LeakyReLU(negative_slope=0.2))
         self.conv11 = nn.Conv1d(128, self.seg_num_all, kernel_size=1, bias=False)
-        
 
     def forward(self, x, l):
         batch_size = x.size(0)
@@ -424,7 +442,7 @@ class DGCNN_semseg(nn.Module):
         self.args = args
         self.k = args.k
         self.num_features = args.num_features
-        
+
         self.bn1 = nn.BatchNorm2d(64)
         self.bn2 = nn.BatchNorm2d(64)
         self.bn3 = nn.BatchNorm2d(64)
@@ -440,13 +458,13 @@ class DGCNN_semseg(nn.Module):
         self.conv2 = nn.Sequential(nn.Conv2d(64, 64, kernel_size=1, bias=False),
                                    self.bn2,
                                    nn.LeakyReLU(negative_slope=0.2))
-        self.conv3 = nn.Sequential(nn.Conv2d(64*2, 64, kernel_size=1, bias=False),
+        self.conv3 = nn.Sequential(nn.Conv2d(64 * 2, 64, kernel_size=1, bias=False),
                                    self.bn3,
                                    nn.LeakyReLU(negative_slope=0.2))
         self.conv4 = nn.Sequential(nn.Conv2d(64, 64, kernel_size=1, bias=False),
                                    self.bn4,
                                    nn.LeakyReLU(negative_slope=0.2))
-        self.conv5 = nn.Sequential(nn.Conv2d(64*2, 64, kernel_size=1, bias=False),
+        self.conv5 = nn.Sequential(nn.Conv2d(64 * 2, 64, kernel_size=1, bias=False),
                                    self.bn5,
                                    nn.LeakyReLU(negative_slope=0.2))
         self.conv6 = nn.Sequential(nn.Conv1d(192, args.emb_dims, kernel_size=1, bias=False),
@@ -462,6 +480,9 @@ class DGCNN_semseg(nn.Module):
         self.conv9 = nn.Conv1d(256, 13, kernel_size=1, bias=False)
 
         self.gsl1 = GraphLearner(self.num_features, 64, num_pers=8, metric_type='weighted_cosine')  # Gaussian_Mahalanobis
+        # self.ga1 = GlobalAttention(self.num_features, self.k)
+        # self.ga2 = GlobalAttention(64, self.k)
+        # self.ga3 = GlobalAttention(64, self.k)
 
     def forward(self, x):
         batch_size = x.size(0)
@@ -470,15 +491,21 @@ class DGCNN_semseg(nn.Module):
         adj = self.gsl1(x.transpose(2, 1))
         knn_val, knn_idx = adj.topk(k=self.k, dim=-1)
 
+        # knn_val, knn_idx = self.ga1(x.transpose(2, 1))
+
         x = get_graph_feature(x, k=self.k, weight=knn_val, idx=knn_idx)   # (batch_size, 9, num_points) -> (batch_size, 9*2, num_points, k)
         x = self.conv1(x)                       # (batch_size, 9*2, num_points, k) -> (batch_size, 64, num_points, k)
         x = self.conv2(x)                       # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
         x1 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
 
+        # knn_val, knn_idx = self.ga1(x1.transpose(2, 1))
+
         x = get_graph_feature(x1, k=self.k, weight=knn_val, idx=knn_idx)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
         x = self.conv3(x)                       # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
         x = self.conv4(x)                       # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
         x2 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
+
+        # knn_val, knn_idx = self.ga1(x2.transpose(2, 1))
 
         x = get_graph_feature(x2, k=self.k, weight=knn_val, idx=knn_idx)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
         x = self.conv5(x)                       # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
