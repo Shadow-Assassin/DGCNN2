@@ -28,32 +28,45 @@ INF = 1e20
 
 
 class GlobalAttention(nn.Module):
-    def __init__(self, input_size, k):
+    def __init__(self, input_size, output_size, k):
         super(GlobalAttention, self).__init__()
         self.k = k
-        self.weight = nn.Parameter(nn.init.xavier_uniform_(torch.Tensor(1, 1, input_size)))
+        self.output_size = output_size
+        self.weight = nn.Parameter(nn.init.xavier_uniform_(torch.Tensor(1, input_size, 1)))
+        self.conv = nn.Sequential(nn.Conv1d(input_size, output_size, padding=k//2, kernel_size=k, bias=False),
+                                   nn.BatchNorm1d(output_size),
+                                   nn.LeakyReLU(negative_slope=0.2))
 
-    def forward(self, x):  # B x N x C
-        B, N, C = x.size(0), x.size(1), x.size(2)
-        att = F.softmax(torch.sum(x * self.weight, dim=-1) / math.sqrt(C), dim=-1)  # B x N
-        _, sort_idx = torch.sort(att, dim=1)  # B x N
-        # sort_idx = sort_idx.detach()
-        knn_val = torch.zeros(B, N, self.k, dtype=x.dtype, device=x.device, requires_grad=True)
-        knn_idx = torch.zeros(B, N, self.k, dtype=sort_idx.dtype, device=x.device)
-        for b in range(B):
-            for i in range(N):
-                if i < self.k / 2:
-                    knn_idx[b, sort_idx[b, i], :] = sort_idx[b, 0:self.k]
-                elif i < N - self.k / 2:
-                    knn_idx[b, sort_idx[b, i], :] = sort_idx[b, i - self.k // 2: i + self.k // 2]
-                else:
-                    knn_idx[b, sort_idx[b, i], :] = sort_idx[b, -self.k:]
-                # knn_val[b, sort_idx[b, i], :] = att[b, knn_idx[b, sort_idx[b, i], :]]
-        index = torch.gather(input=knn_idx, dim=1, index=sort_idx[..., None].expand(-1, -1, self.k))
-        src = torch.gather(input=att[..., None].expand(-1, -1, self.k), dim=1, index=index)
-        knn_val = torch.scatter(input=knn_val, dim=1, index=sort_idx[..., None].expand(-1, -1, self.k), src=src)
-        # knn_val.requires_grad = True
-        return knn_val, knn_idx
+    def forward(self, x):  # B x C x N
+        B = x.size(0)
+        C = x.size(1)
+        N = x.size(2)
+        att = F.softmax(torch.sum(x * self.weight, dim=1) / math.sqrt(C), dim=1)  # B x N
+        sort_att, sort_idx = torch.sort(att, dim=1)  # B x N
+        _, reverse_sort_idx = torch.sort(sort_idx)
+
+        # # explicit knn_idx
+        # knn_val = torch.zeros(B, N, self.k, dtype=x.dtype, device=x.device, requires_grad=True)
+        # knn_idx = torch.zeros(B, N, self.k, dtype=sort_idx.dtype, device=x.device)
+        # for b in range(B):
+        #     for i in range(N):
+        #         if i < self.k / 2:
+        #             knn_idx[b, sort_idx[b, i], :] = sort_idx[b, 0:self.k]
+        #         elif i < N - self.k / 2:
+        #             knn_idx[b, sort_idx[b, i], :] = sort_idx[b, i - self.k // 2: i + self.k // 2]
+        #         else:
+        #             knn_idx[b, sort_idx[b, i], :] = sort_idx[b, -self.k:]
+        #         # knn_val[b, sort_idx[b, i], :] = att[b, knn_idx[b, sort_idx[b, i], :]]
+        # index = torch.gather(input=knn_idx, dim=1, index=sort_idx[..., None].expand(-1, -1, self.k))
+        # src = torch.gather(input=att[..., None].expand(-1, -1, self.k), dim=1, index=index)
+        # knn_val = torch.scatter(input=knn_val, dim=1, index=sort_idx[..., None].expand(-1, -1, self.k), src=src)
+        # return knn_val, knn_idx
+
+        # 1D convolution (add agg)
+        x_sort = torch.gather(input=x, dim=2, index=sort_idx[:,None].expand(-1,C,-1))
+        x = self.conv(x_sort*sort_att[:, None])
+        x_sort_reverse = torch.gather(input=x, dim=2, index=reverse_sort_idx[:, None].expand(-1, self.output_size, -1))
+        return x_sort_reverse
 
 
 class GraphLearner(nn.Module):
@@ -479,37 +492,35 @@ class DGCNN_semseg(nn.Module):
         self.dp1 = nn.Dropout(p=args.dropout)
         self.conv9 = nn.Conv1d(256, 13, kernel_size=1, bias=False)
 
-        self.gsl1 = GraphLearner(self.num_features, 64, num_pers=8, metric_type='weighted_cosine')  # Gaussian_Mahalanobis
-        # self.ga1 = GlobalAttention(self.num_features, self.k)
-        # self.ga2 = GlobalAttention(64, self.k)
-        # self.ga3 = GlobalAttention(64, self.k)
+        # self.gsl1 = GraphLearner(self.num_features, 64, num_pers=8, metric_type='weighted_cosine')  # Gaussian_Mahalanobis
+        self.ga1 = GlobalAttention(self.num_features, 64, self.k)
+        self.ga2 = GlobalAttention(64, 64, self.k)
+        self.ga3 = GlobalAttention(64, 64, self.k)
 
     def forward(self, x):
         batch_size = x.size(0)
         num_points = x.size(2)
 
-        adj = self.gsl1(x.transpose(2, 1))
-        knn_val, knn_idx = adj.topk(k=self.k, dim=-1)
+        # adj = self.gsl1(x.transpose(2, 1))
+        # knn_val, knn_idx = adj.topk(k=self.k, dim=-1)
 
-        # knn_val, knn_idx = self.ga1(x.transpose(2, 1))
+        x1 = self.ga1(x)
+        x2 = self.ga2(x1)
+        x3 = self.ga3(x2)
 
-        x = get_graph_feature(x, k=self.k, weight=knn_val, idx=knn_idx)   # (batch_size, 9, num_points) -> (batch_size, 9*2, num_points, k)
-        x = self.conv1(x)                       # (batch_size, 9*2, num_points, k) -> (batch_size, 64, num_points, k)
-        x = self.conv2(x)                       # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
-        x1 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
+        # x = get_graph_feature(x, k=self.k, weight=knn_val, idx=knn_idx)   # (batch_size, 9, num_points) -> (batch_size, 9*2, num_points, k)
+        # x = self.conv1(x)                       # (batch_size, 9*2, num_points, k) -> (batch_size, 64, num_points, k)
+        # x = self.conv2(x)                       # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
+        # x1 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
 
-        # knn_val, knn_idx = self.ga1(x1.transpose(2, 1))
+        # x = get_graph_feature(x1, k=self.k, weight=knn_val, idx=knn_idx)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
+        # x = self.conv3(x)                       # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
+        # x = self.conv4(x)                       # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
+        # x2 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
 
-        x = get_graph_feature(x1, k=self.k, weight=knn_val, idx=knn_idx)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
-        x = self.conv3(x)                       # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
-        x = self.conv4(x)                       # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points, k)
-        x2 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
-
-        # knn_val, knn_idx = self.ga1(x2.transpose(2, 1))
-
-        x = get_graph_feature(x2, k=self.k, weight=knn_val, idx=knn_idx)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
-        x = self.conv5(x)                       # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
-        x3 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
+        # x = get_graph_feature(x2, k=self.k, weight=knn_val, idx=knn_idx)     # (batch_size, 64, num_points) -> (batch_size, 64*2, num_points, k)
+        # x = self.conv5(x)                       # (batch_size, 64*2, num_points, k) -> (batch_size, 64, num_points, k)
+        # x3 = x.max(dim=-1, keepdim=False)[0]    # (batch_size, 64, num_points, k) -> (batch_size, 64, num_points)
 
         x = torch.cat((x1, x2, x3), dim=1)      # (batch_size, 64*3, num_points)
 
